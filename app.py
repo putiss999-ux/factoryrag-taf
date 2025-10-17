@@ -51,7 +51,7 @@ from datetime import datetime
 os.environ.setdefault("HOME", "/app")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHERUSAGESTATS", "false")
 os.environ.setdefault("STREAMLIT_CONFIG_DIR", "/app/.streamlit")
-Path("/app/.streamlit").mkdir(parents=True, exist_ok=True)
+Path("./.streamlit").mkdir(parents=True, exist_ok=True)
 
 # ─────────────────────────────────────────────────────────
 st.set_page_config(page_title="FactoryRAG-TAF Chat + Expert Eval", layout="wide")
@@ -791,6 +791,7 @@ if run and query.strip():
 
 else:
     st.info("พิมพ์คำถามแล้วกด Run เพื่อดูผลลัพธ์จาก manuals + CMMS + sensor และ (ถ้าเปิด) สรุปผลด้วยโมเดลฟรีบน Hugging Face")
+
 
 
 

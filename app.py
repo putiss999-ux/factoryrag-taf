@@ -1,19 +1,59 @@
 # ============================================
-# app_factoryrag_streamlit.py  (FULL + Free AI on HF)
+# app.py  (FULL + Free AI on HF, Spaces-ready)
 # FactoryRAG-TAF — Chat & Expert Evaluation
 # with Result Explanation (Rule-based TH/EN) + (Optional) Free AI via HuggingFace
 # ============================================
 
+# ---------- Hugging Face Spaces: fix write/caching perms ----------
+import os
+from pathlib import Path
+
+RUNTIME_DIR = "/tmp/.streamlit"
+Path(RUNTIME_DIR).mkdir(parents=True, exist_ok=True)
+os.environ["HOME"] = "/tmp"
+os.environ["XDG_CACHE_HOME"] = RUNTIME_DIR
+os.environ["XDG_CONFIG_HOME"] = RUNTIME_DIR
+os.environ["XDG_STATE_HOME"] = RUNTIME_DIR
+os.environ["STREAMLIT_CACHE_DIR"] = os.path.join(RUNTIME_DIR, "cache")
+os.environ["HF_HOME"] = "/tmp"          # HF cache
+os.environ["TRANSFORMERS_CACHE"] = "/tmp"
+
+# =====================================
+# Fix Streamlit PermissionError on Hugging Face
+# =====================================
+import os
+from pathlib import Path
+
+TMP_DIR = "/tmp/streamlit_fix"
+Path(TMP_DIR).mkdir(parents=True, exist_ok=True)
+os.environ["STREAMLIT_HOME"] = TMP_DIR
+os.environ["STREAMLIT_CACHE_DIR"] = os.path.join(TMP_DIR, "cache")
+os.environ["XDG_CONFIG_HOME"] = TMP_DIR
+os.environ["XDG_CACHE_HOME"] = TMP_DIR
+os.environ["XDG_STATE_HOME"] = TMP_DIR
+os.environ["HOME"] = TMP_DIR
+
+cfg_path = Path(TMP_DIR) / "config.toml"
+if not cfg_path.exists():
+    with open(cfg_path, "w") as f:
+        f.write("[server]\nheadless = true\nport = 8501\n")
+
+# =====================================
+# Now safe to import streamlit
+# =====================================
 import streamlit as st
 import pandas as pd
 import numpy as np
 import json, re, math, hashlib, time, textwrap
-from pathlib import Path
 from collections import Counter
 from datetime import datetime
 
+os.environ.setdefault("HOME", "/app")
+os.environ.setdefault("STREAMLIT_BROWSER_GATHERUSAGESTATS", "false")
+os.environ.setdefault("STREAMLIT_CONFIG_DIR", "/app/.streamlit")
+Path("/app/.streamlit").mkdir(parents=True, exist_ok=True)
+
 # ─────────────────────────────────────────────────────────
-# MUST be first Streamlit command
 st.set_page_config(page_title="FactoryRAG-TAF Chat + Expert Eval", layout="wide")
 # ─────────────────────────────────────────────────────────
 
@@ -30,19 +70,25 @@ LOG_PATH = Path("expert_chat_logs.csv")
 # -----------------------------
 # LOAD DATA (cached)
 # -----------------------------
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def load_all():
     cmms = pd.read_csv(PATH_CMMS) if PATH_CMMS.exists() else pd.DataFrame()
     sensor = pd.read_csv(PATH_SENSOR) if PATH_SENSOR.exists() else pd.DataFrame()
     manuals = []
     if PATH_MAN.exists():
-        with open(PATH_MAN, "r", encoding="utf-8") as f:
-            manuals = json.load(f)
+        try:
+            with open(PATH_MAN, "r", encoding="utf-8") as f:
+                manuals = json.load(f)
+        except Exception:
+            manuals = []
     queries = pd.read_csv(PATH_Q) if PATH_Q.exists() else pd.DataFrame()
     weights = {}
     if PATH_WEIGHTS.exists():
-        with open(PATH_WEIGHTS, "r", encoding="utf-8") as f:
-            weights = json.load(f)
+        try:
+            with open(PATH_WEIGHTS, "r", encoding="utf-8") as f:
+                weights = json.load(f)
+        except Exception:
+            weights = {}
     return cmms, sensor, manuals, queries, weights
 
 cmms, sensor, manuals, queries, weights = load_all()
@@ -147,8 +193,10 @@ NUM_RE_DEG = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*°?c", re.IGNORECASE)
 def query_to_feature_vector(q: str):
     ql = q.lower()
     v = mu.copy()
-    if "1x" in ql: v[FEATURE_COLS.index("one_x_rpm")] = 1.0
-    if "2x" in ql: v[FEATURE_COLS.index("two_x_rpm")] = 1.0
+    if "1x" in ql:
+        v[FEATURE_COLS.index("one_x_rpm")] = 1.0
+    if "2x" in ql:
+        v[FEATURE_COLS.index("two_x_rpm")] = 1.0
     m = NUM_RE_HZ.search(ql)
     if m:
         val, unit = m.groups()
@@ -159,14 +207,16 @@ def query_to_feature_vector(q: str):
         degc = float(m.group(1))
         v[FEATURE_COLS.index("temp_max_c")] = degc
     if ("bearing" in ql or "bpfi" in ql):
-        idx = FEATURE_COLS.index("band_energy_2k_3k"); v[idx] = max(mu[idx], 0.45)
-    if "cavitation" in ql or "broadband" in ql):
-        idx = FEATURE_COLS.index("band_energy_2k_3k"); v[idx] = mu[idx] + 0.2
-    if "misalignment" in ql or "2x" in ql):
+        idx = FEATURE_COLS.index("band_energy_2k_3k")
+        v[idx] = max(mu[idx], 0.45)
+    if ("cavitation" in ql or "broadband" in ql):
+        idx = FEATURE_COLS.index("band_energy_2k_3k")
+        v[idx] = mu[idx] + 0.2
+    if ("misalignment" in ql or "2x" in ql):
         v[FEATURE_COLS.index("rms")] = mu[0] + 0.08
-    if "unbalance" in ql or ("1x" in ql and "2x" not in ql):
+    if ("unbalance" in ql or ("1x" in ql and "2x" not in ql)):
         v[FEATURE_COLS.index("rms")] = mu[0] + 0.06
-    if "grease" in ql or "lubricat" in ql):
+    if ("grease" in ql or "lubricat" in ql):
         v[FEATURE_COLS.index("temp_max_c")] = max(mu[-1], 80.0)
     return (v - mu) / sd
 
@@ -183,6 +233,36 @@ def sensor_retrieve_knn(query_text: str, k=10, label_bonus=0.15):
         sid = sensor_feat.iloc[i].get("sensor_id", f"S{i}")
         out.append((sid, float(sims[i])))
     return out
+
+# -----------------------------
+# Symptom clues & rules
+# -----------------------------
+CLUE_RE_LIST = [
+    r"\b1x\b", r"\b2x\b", r"\bpeak\b", r"\bhz\b", r"\bkhz\b",
+    r"\brpm\b", r"\btemp\b", r"อุณหภูมิ", r"ความถี่", r"ค่า\s*rms", r"\bkurtosis\b"
+]
+CLUE_RE = re.compile("|".join(CLUE_RE_LIST), re.IGNORECASE)
+
+def has_sensor_clues(q: str) -> bool:
+    if not isinstance(q, str) or not q.strip():
+        return False
+    return bool(CLUE_RE.search(q))
+
+SYMPTOM_RULES = [
+    (re.compile(r"(ไม่.*ไหล|น้ำไม่.*ไหล|flow\s*(low|drop)|แรงดัน(ตก|ต่ำ))", re.I), "clogging"),
+    (re.compile(r"(คาวิเทช|cavitat|ตะแกรง|วาล์ว.*(ปิด|อั้น))", re.I), "clogging"),
+    (re.compile(r"(น้ำ.*(รั่ว|ซึม)|ซีล|packing|seal)", re.I), "seal_wear"),
+    (re.compile(r"(ร้อน|อุณหภูมิสูง|จาระบี|หล่อลื่น)", re.I), "lubrication_issue"),
+    (re.compile(r"(ไม่ทำงาน|สตาร์ทไม่ติด|trip|เบรกเกอร์|ฟิวส์)", re.I), "not_running"),
+    (re.compile(r"(เสียงดัง|สั่นแรง|ไวเบรชันสูง)", re.I), "unbalance"),
+]
+def guess_label_from_symptom(q: str) -> str | None:
+    for pat, lbl in SYMPTOM_RULES:
+        if pat.search(q or ""):
+            return lbl
+    if re.search(r"(alignment|แนวเพลา|ตั้งศูนย์)", re.I):
+        return "misalignment"
+    return None
 
 # -----------------------------
 # Task categorization
@@ -202,19 +282,27 @@ def znormalize(arr):
     return (arr - arr.mean())/(arr.std()+1e-9) if len(arr)>0 else arr
 
 def fuse_results(query_text, w_text, w_sensor, k=5):
+    # ปรับน้ำหนักแบบไดนามิก: ปิด sensor หากไม่มีคำใบ้สัญญาณ
+    use_sensor = has_sensor_clues(query_text) and len(Xz) > 0
+    wt_eff = float(w_text)
+    ws_eff = float(w_sensor) if use_sensor else 0.0
+
     t = bm25_all.topk(query_text, k=10)
-    s = sensor_retrieve_knn(query_text, k=10)
+    s = sensor_retrieve_knn(query_text, k=10) if use_sensor else []
+
     t_ids, t_scores = zip(*t) if t else ([],[])
     s_ids, s_scores = zip(*s) if s else ([],[])
     t_z = znormalize(list(t_scores)) if t_scores else np.array([])
     s_z = znormalize(list(s_scores)) if s_scores else np.array([])
+
     fused = {}
     for i, docid in enumerate(t_ids):
-        fused[docid] = fused.get(docid, 0.0) + w_text*float(t_z[i])
+        fused[docid] = fused.get(docid, 0.0) + wt_eff*float(t_z[i])
     for i, sid in enumerate(s_ids):
-        fused[sid] = fused.get(sid, 0.0) + w_sensor*float(s_z[i])
+        fused[sid] = fused.get(sid, 0.0) + ws_eff*float(s_z[i])
+
     ranked = sorted(fused.items(), key=lambda x: -x[1])[:k]
-    return ranked, dict(t), dict(s)
+    return ranked, dict(t), dict(s), {"use_sensor": use_sensor, "wt_eff": wt_eff, "ws_eff": ws_eff}
 
 # =========================
 # RESULT EXPLANATION (Rule-based TH/EN)
@@ -382,86 +470,117 @@ def explain_labels_from_results(fused_rank, sensor_df, lang="th", top_n=2):
     return explanations
 
 # -----------------------------
-# 🔁 (Optional) Free AI on HF — transformers pipeline
+# Free AI — polish rule-based into operator-friendly bullets
 # -----------------------------
-def safe_truncate(txt: str, max_chars: int) -> str:
-    txt = str(txt)
-    return (txt[:max_chars] + "…") if len(txt) > max_chars else txt
+def _rule_based_operator_summary(query_text, fused_rank, sensor_df, lang="th"):
+    exps = explain_labels_from_results(fused_rank, sensor_df, lang=lang, top_n=1)
 
-def build_context_from_results(query_text, fused_rank, manuals, cmms, sensor_df, max_chars_each=700, max_items=3):
-    """
-    สร้าง context แบบย่อจาก Top-K ที่ค้นเจอจริง (manual/CMMS/sensor)
-    เพื่อส่งให้โมเดลโอเพนซอร์สสรุปผล (ภาษาไทย)
-    """
-    blocks = [f"[Question]\n{safe_truncate(query_text, 400)}\n"]
-    added = 0
-    for rid, _ in fused_rank[:max_items]:
-        # Manual
-        for m in manuals:
-            if m.get("chunk_id") == rid:
-                blocks.append("[Manual]\n" + safe_truncate(m.get("text",""), max_chars_each))
-                added += 1; break
-        # CMMS
-        if not cmms.empty and "log_id" in cmms.columns:
-            row = cmms[cmms["log_id"].astype(str) == str(rid)]
-            if not row.empty:
-                r = row.iloc[0][["symptom_text","action_text","cause_text","fault_label"]].to_dict()
-                blocks.append("[CMMS]\n" + safe_truncate(json.dumps(r, ensure_ascii=False), max_chars_each))
-                added += 1
-        # Sensor
-        if not sensor_df.empty and "sensor_id" in sensor_df.columns:
-            row = sensor_df[sensor_df["sensor_id"].astype(str) == str(rid)]
-            if not row.empty:
-                r = row.iloc[0][["sensor_id","label","rms","kurtosis","peak_freq_hz","band_energy_2k_3k","one_x_rpm","two_x_rpm","temp_max_c"]].to_dict()
-                blocks.append("[Sensor]\n" + safe_truncate(json.dumps(r, ensure_ascii=False), max_chars_each))
-                added += 1
-        if added >= max_items*2:  # กัน context ยาวเกิน
-            break
-    return "\n\n".join(blocks)
+    if not exps:
+        # fallback ตามอาการในคำถาม
+        lbl_sym = guess_label_from_symptom(query_text)
+        if lbl_sym and lbl_sym in LABEL_EXPLANATIONS:
+            pack = LABEL_EXPLANATIONS[lbl_sym].get(lang, LABEL_EXPLANATIONS[lbl_sym]["th"])
+            exps = [{"label": lbl_sym, "title": pack["title"], "desc": pack["desc"], "checks": pack["checks"]}]
+        elif lbl_sym == "not_running":
+            if lang == "th":
+                return ("• สาเหตุที่เป็นไปได้: ระบบไฟ/อินเตอร์ล็อกตัด เครื่องจ่ายไฟไม่ครบ หรือชุดขับติดขัด\n"
+                        "• สิ่งที่ควรตรวจ: เบรกเกอร์/ฟิวส์/โอเวอร์โหลด • ปุ่มฉุกเฉิน/สวิตช์ความดัน/การ์ดอินเตอร์ล็อก • คัปปลิงหลุด/มอเตอร์ค้าง\n"
+                        "• วิธีแก้เบื้องต้น: เคลียร์ trip รีเซ็ตอุปกรณ์ ตรวจการหมุนอิสระก่อนสตาร์ทใหม่\n"
+                        "• ข้อควรระวัง: ทำ LOTO และทดสอบฉนวนก่อนทำงานไฟฟ้า")
+            else:
+                return ("• Probable causes: power/interlock trips or drive seizure\n"
+                        "• Checks: breaker/fuse/overload • E-stop/pressure switch/guard interlock • coupling/motor free\n"
+                        "• Quick fixes: clear trips, reset, ensure free rotation before restart\n"
+                        "• Safety: LOTO and electrical safety")
+
+    if exps:
+        e = exps[0]
+        if lang == "th":
+            return (f"• สาเหตุที่เป็นไปได้: {e['title']}\n"
+                    f"• สิ่งที่ควรตรวจ: " + " ; ".join(e["checks"][:3]) + "\n"
+                    f"• วิธีแก้เบื้องต้น: ปรับตั้ง/ขันแน่น/หล่อลื่นตามสเปก\n"
+                    f"• ข้อควรระวัง: ปิดเครื่องและทำ LOTO ก่อนตรวจวัดทุกครั้ง")
+        else:
+            return (f"• Probable causes: {e['title']}\n"
+                    f"• Checks: " + " ; ".join(e["checks"][:3]) + "\n"
+                    f"• Quick fixes: re-align/tighten/lubricate per spec\n"
+                    f"• Safety: LOTO before any work")
+
+    # ถ้ายังไม่มีอะไรเลย
+    if lang == "th":
+        return ("• สาเหตุที่เป็นไปได้: ตรวจเพลา/การไหล/แรงดัน/หล่อลื่น\n"
+                "• สิ่งที่ควรตรวจ: 1×/2×, อุณหภูมิปลายเพลา, คัปปลิง, ซีล, แบริ่ง\n"
+                "• วิธีแก้เบื้องต้น: ตั้งศูนย์/ขันแน่น/ปรับหล่อลื่นตามสเปก\n"
+                "• ข้อควรระวัง: ปิดเครื่องและทำ LOTO ก่อนทำงาน")
+    else:
+        return ("• Probable causes: shaft/flow/pressure/lubrication issues\n"
+                "• Checks: 1×/2×, shaft temp, coupling, seal, bearing\n"
+                "• Quick fixes: re-align, tighten, lubricate per spec\n"
+                "• Safety: LOTO before work")
 
 @st.cache_resource(show_spinner=False)
-def load_hf_pipeline(model_name: str = "microsoft/Phi-3-mini-4k-instruct", max_new_tokens: int = 360):
-    """
-    โหลดโมเดลโอเพนซอร์สสำหรับสรุปผลแบบไทย
-    - เลือกโมเดลเบาเพื่อรันบน CPU ของ Hugging Face Spaces ได้
-    - เปลี่ยนชื่อโมเดลใน Sidebar ได้
-    """
-    try:
-        from transformers import pipeline
-        gen = pipeline(
-            "text-generation",
-            model=model_name,
-            device_map="auto",
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=0
-        )
-        return gen
-    except Exception as e:
-        st.error(f"ไม่สามารถโหลดโมเดล {model_name}: {e}")
-        return None
+def load_hf_pipeline(model_name: str, max_new_tokens: int = 80):
+    from transformers import pipeline
+    task = "text2text-generation" if any(k in model_name.lower() for k in ["flan","t5","ul2"]) else "text-generation"
+    gen = pipeline(
+        task=task,
+        model=model_name,
+        device_map="auto",
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        temperature=0.0,
+        top_p=1.0,
+        repetition_penalty=1.05,
+        truncation=True,
+        pad_token_id=0,
+    )
+    return gen
 
 def ai_explain_free_hf(query_text, fused_rank, manuals, cmms, sensor_df, model_name, lang_code="th"):
-    ctx = build_context_from_results(query_text, fused_rank, manuals, cmms, sensor_df)
-    sys_t = "คุณคือผู้ช่วยผู้เชี่ยวชาญซ่อมบำรุงโรงงาน ช่วยอธิบายให้กระชับ ชัดเจน และปลอดภัย"
-    if lang_code == "en":
-        sys_t = "You are an industrial maintenance expert assistant; be concise, clear, and safe."
-    prompt = (
-        f"{sys_t}\n\n"
-        f"{ctx}\n\n"
-        f"สรุปผลเป็นภาษาไทยโดยเน้น:\n"
-        f"- สาเหตุที่เป็นไปได้ (root cause)\n- สิ่งที่ควรตรวจ (checks)\n- วิธีแก้ไขเบื้องต้น (fix)\n"
-        if lang_code=="th" else
-        f"{sys_t}\n\n{ctx}\n\nSummarize in English:\n- Probable root causes\n- What to check\n- Quick fixes\n"
-    )
-    gen = load_hf_pipeline(model_name=model_name)
-    if gen is None:
-        return None
-    out = gen(prompt)
-    text = out[0].get("generated_text","").strip()
-    # ทำความสะอาดเบื้องต้น
-    text = text.split("[Question]")[-1] if "[Question]" in text else text
-    return textwrap.dedent(text).strip()
+    # 1) ทำร่าง 4 บรรทัดแบบเสถียร
+    draft = _rule_based_operator_summary(query_text, fused_rank, sensor_df, lang=lang_code)
+
+    # 2) ให้โมเดล “รีไรต์” โดยห้ามเพิ่มเนื้อหา
+    if lang_code == "th":
+        polish_prompt = (
+            "โปรดปรับปรุงข้อความต่อไปนี้ให้เป็นภาษาช่างหน้างาน อ่านง่าย กระชับ และยังคง 4 หัวข้อเดิมเป๊ะ "
+            "(ห้ามเพิ่ม/ลดหัวข้อ และห้ามเติมข้อมูลใหม่)\n\n"
+            "รูปแบบที่ต้องการ:\n"
+            "• สาเหตุที่เป็นไปได้: …\n"
+            "• สิ่งที่ควรตรวจ: …\n"
+            "• วิธีแก้เบื้องต้น: …\n"
+            "• ข้อควรระวัง: …\n\n"
+            f"{draft}"
+        )
+    else:
+        polish_prompt = (
+            "Rewrite the following into clear field-tech bullets keeping EXACTLY these 4 headings "
+            "(do not add new facts):\n"
+            "• Probable causes: …\n"
+            "• Checks: …\n"
+            "• Quick fixes: …\n"
+            "• Safety: …\n\n"
+            f"{draft}"
+        )
+
+    try:
+        gen = load_hf_pipeline(model_name=model_name, max_new_tokens=80)
+        out = gen(polish_prompt)
+        text = out[0].get("generated_text","").strip()
+
+        # clean: ให้ขึ้นต้นด้วย • และเอาแค่ 4 บรรทัด
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        cleaned = []
+        for ln in lines:
+            if ln.startswith("- "): ln = "• " + ln[2:].strip()
+            if not ln.startswith("•"): ln = "• " + ln
+            cleaned.append(ln)
+            if len(cleaned) >= 4: break
+        if len(cleaned) < 4:
+            return draft
+        return "\n".join(cleaned)
+    except Exception:
+        return draft
 
 # -----------------------------
 # UI
@@ -479,16 +598,16 @@ domain = st.sidebar.text_input("Factory domain", "Sugar Mill")
 st.sidebar.header("⚙️ Retrieval Settings")
 task_mode = st.sidebar.selectbox("Task", ["auto","diagnosis","parameter_lookup","procedure"], index=0)
 
-default_wt = 0.5; default_ws = 0.5
+default_wt = 0.7; default_ws = 0.3  # ค่าเริ่มต้นเน้นข้อความ (เร็ว+เสถียร)
 if weights: st.sidebar.info("Loaded task-aware weights from file.")
 else:       st.sidebar.warning("No task_aware_best_weights.json found — using manual sliders below.")
 
 if task_mode != "auto" and weights.get(task_mode):
-    default_wt = float(weights[task_mode].get("w_text", 0.5))
-    default_ws = float(weights[task_mode].get("w_sensor", 0.5))
+    default_wt = float(weights[task_mode].get("w_text", default_wt))
+    default_ws = float(weights[task_mode].get("w_sensor", default_ws))
 
-w_text = st.sidebar.slider("Weight: Text", 0.0, 1.0, default_wt, 0.1)
-w_sensor = st.sidebar.slider("Weight: Sensor", 0.0, 1.0, default_ws, 0.1)
+w_text = st.sidebar.slider("Weight: Text", 0.0, 1.0, default_wt, 0.05)
+w_sensor = st.sidebar.slider("Weight: Sensor", 0.0, 1.0, default_ws, 0.05)
 top_k = st.sidebar.slider("Top-K", 3, 10, 5)
 
 # Sidebar: Explanation
@@ -498,15 +617,22 @@ lang_code = "th" if lang_choice == "ไทย" else "en"
 
 # Sidebar: Free AI (HF)
 st.sidebar.header("🤖 Free AI (Hugging Face)")
-use_hf_ai = st.sidebar.toggle("Use Free AI (HF)", value=False, help="สรุปผลด้วยโมเดลโอเพนซอร์สฟรี (ช้าแต่มนุษย์อ่านเข้าใจ)")
+use_hf_ai = st.sidebar.toggle("Use Free AI (HF)", value=False, help="สรุปผลด้วยโมเดลโอเพนซอร์สฟรี (เน้นสั้น/อ่านง่าย)")
 model_name = st.sidebar.selectbox(
-    "Model",
-    ["microsoft/Phi-3-mini-4k-instruct", "TinyLlama/TinyLlama-1.1B-Chat-v1.0", "Qwen/Qwen2.5-1.5B-Instruct"],
+    "Model (แนะนำ: เร็วมากบน CPU)",
+    [
+        "google/flan-t5-small",                 # เร็วมากบน CPU (default)
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "Qwen/Qwen2.5-1.5B-Instruct",
+        "microsoft/Phi-3-mini-4k-instruct"      # ช้าบน CPU
+    ],
     index=0
 )
 
 # Main input
-query = st.text_area("พิมพ์คำถามที่นี่:", value=(queries["query_text"].iloc[0] if ("query_text" in queries.columns and len(queries)>0) else ""), height=120, placeholder="เช่น 'ปั๊มป้อนน้ำอ้อยสั่นผิดปกติหลัง PM ควรตรวจอะไร'")
+query_default = (queries["query_text"].iloc[0] if ("query_text" in queries.columns and len(queries)>0) else "")
+query = st.text_area("พิมพ์คำถามที่นี่:", value=query_default, height=120,
+                     placeholder="เช่น 'ปั๊มป้อนน้ำอ้อยสั่นผิดปกติหลัง PM ควรตรวจอะไร'")
 run = st.button("🔎 Run")
 
 if run and query.strip():
@@ -521,10 +647,12 @@ if run and query.strip():
         wt, ws = w_text, w_sensor
 
     t0 = time.time()
-    fused_rank, text_dict, sensor_dict = fuse_results(query, wt, ws, k=top_k)
+    fused_rank, text_dict, sensor_dict, wtinfo = fuse_results(query, wt, ws, k=top_k)
     latency_ms = int((time.time() - t0)*1000)
 
-    st.subheader(f"📌 Task = **{task}**  |  Weights: text={wt:.2f}, sensor={ws:.2f}  |  Latency: {latency_ms} ms")
+    st.subheader(f"📌 Task = **{task}**  |  Weights: text={wtinfo['wt_eff']:.2f}, sensor={wtinfo['ws_eff']:.2f}  |  Latency: {latency_ms} ms")
+    if not wtinfo["use_sensor"]:
+        st.caption("ℹ️ ปิดฝั่ง sensor อัตโนมัติ เพราะคำถามไม่มีคำใบ้เชิงสัญญาณ (1×/2×, Hz, °C ฯลฯ)")
 
     # Display fused ranking with provenance
     st.markdown("### 🔗 Top Results (Fused)")
@@ -565,6 +693,26 @@ if run and query.strip():
     st.markdown("---")
     st.markdown("### 🧠 Result Explanation (Rule-based)")
     exps = explain_labels_from_results(fused_rank, sensor_feat, lang=lang_code, top_n=2)
+    if not exps:
+        # โชว์ตามอาการหากไม่มี sensor label
+        lbl_sym = guess_label_from_symptom(query)
+        if lbl_sym and lbl_sym in LABEL_EXPLANATIONS:
+            pack = LABEL_EXPLANATIONS[lbl_sym].get(lang_code, LABEL_EXPLANATIONS[lbl_sym]["th"])
+            exps = [{"label": lbl_sym, "title": pack["title"], "desc": pack["desc"], "checks": pack["checks"]}]
+        elif lbl_sym == "not_running":
+            if lang_code == "th":
+                st.markdown("**เครื่องไม่ทำงาน / สตาร์ทไม่ติด**")
+                st.write("เน้นตรวจระบบไฟและ interlock ก่อนจะเปิดเครื่อง")
+                st.markdown("- **สิ่งที่ควรตรวจ:**")
+                for c in ["ตรวจไฟหลัก/เบรกเกอร์/ฟิวส์/โอเวอร์โหลด", "ปุ่มฉุกเฉิน/สวิตช์ความดัน/การ์ดอินเตอร์ล็อก", "คัปปลิงหลุด/มอเตอร์ติดขัด"]:
+                    st.markdown(f"  - {c}")
+            else:
+                st.markdown("**Pump not running / cannot start**")
+                st.write("Check electrical supply and interlocks before mechanical work.")
+                st.markdown("- **Checks:**")
+                for c in ["Main breaker/fuse/overload", "E-stop/pressure switch/guard interlock", "Coupling shear/loose, motor seized"]:
+                    st.markdown(f"  - {c}")
+
     if exps:
         for e in exps:
             st.markdown(f"**{e['title']}**")
@@ -572,18 +720,15 @@ if run and query.strip():
             st.markdown("- **สิ่งที่ควรตรวจ:**" if lang_code == "th" else "- **Recommended checks:**")
             for c in e["checks"]: st.markdown(f"  - {c}")
             st.markdown("")
-    else:
-        st.caption("ยังไม่พบหลักฐานจาก sensor label ที่ชัดเจนเพื่อสรุปผล")
+    elif not exps and lang_code != "th":
+        st.caption("No clear sensor-based evidence to summarize.")
 
     # --- Free AI Explanation (HF) ---
     if use_hf_ai:
         st.markdown("### 🤖 Result Explanation (Free AI — Hugging Face)")
         with st.spinner(f"กำลังสรุปผลด้วยโมเดลฟรี: {model_name} ..."):
             ai_text = ai_explain_free_hf(query, fused_rank, manuals, cmms, sensor_feat, model_name=model_name, lang_code=lang_code)
-        if ai_text:
-            st.write(ai_text)
-        else:
-            st.warning("ไม่สามารถสร้างคำอธิบายด้วยโมเดลฟรีได้ (ตรวจ requirements/โมเดล/โควต้า)")
+        st.markdown(ai_text if ai_text else "_ไม่สามารถสร้างคำอธิบายด้วยโมเดลฟรีได้_")
 
     # --- Expert rating panel
     st.markdown("---")
@@ -617,7 +762,7 @@ if run and query.strip():
             "factory_domain": domain,
             "task": task,
             "query_text": query,
-            "w_text": wt, "w_sensor": ws, "top_k": top_k,
+            "w_text": wtinfo['wt_eff'], "w_sensor": wtinfo['ws_eff'], "top_k": top_k,
             "rated_accuracy": rated_accuracy,
             "rated_completeness": rated_completeness,
             "rated_groundedness": rated_groundedness,
@@ -646,5 +791,6 @@ if run and query.strip():
 
 else:
     st.info("พิมพ์คำถามแล้วกด Run เพื่อดูผลลัพธ์จาก manuals + CMMS + sensor และ (ถ้าเปิด) สรุปผลด้วยโมเดลฟรีบน Hugging Face")
+
 
 
